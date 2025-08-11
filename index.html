@@ -20,6 +20,7 @@
            data-auto_prompt="false">
       </div>
       <div class="g_id_signin" data-type="standard"></div>
+      <button id="authBtn" class="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition hidden">Authorize Gmail Access</button>
     </div>
 
     <!-- Dashboard Section -->
@@ -77,7 +78,8 @@
     const sortBtn = document.getElementById("sortBtn");
     const searchInput = document.getElementById("searchInput");
     const exportBtn = document.getElementById("exportBtn");
-    const API_BASE_URL = window.location.origin; // Use deployed URL
+    const authBtn = document.getElementById("authBtn");
+    const API_BASE_URL = window.location.origin;
 
     window.onload = function() {
       const savedEmail = localStorage.getItem("userEmail");
@@ -108,10 +110,15 @@
           localStorage.setItem("userEmail", userEmail);
           login.classList.add("hidden");
           dashboard.classList.remove("hidden");
+          authBtn.classList.remove("hidden"); // Show authorize button after login
         }
       })
       .catch(err => console.error("Login error:", err));
     }
+
+    authBtn.addEventListener("click", () => {
+      window.location.href = `${API_BASE_URL}/auth/init`;
+    });
 
     document.getElementById("fetchBtn").addEventListener("click", fetchData);
 
@@ -180,7 +187,7 @@
       const filteredData = applySearchFilter(originalData);
       const sortedData = filteredData.sort((a, b) => {
         const dateA = parseExpiryDate(a.expiry);
-        const dateB = parseExpiryDate(b.expiry);
+        dateB = parseExpiryDate(b.expiry);
         if (!dateA && !dateB) return 0;
         if (!dateA) return 1;
         if (!dateB) return -1;
