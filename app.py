@@ -4,10 +4,9 @@ import logging
 import pandas as pd
 import io
 import re
-import json
 import secrets
 
-from flask import Flask, request, jsonify, send_from_directory, redirect, url_for
+from flask import Flask, request, jsonify, send_from_directory, redirect, url_for, session
 from flask_cors import CORS
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
@@ -226,11 +225,10 @@ def fetch_mails(email):
     except Exception as e:
         logger.error(f"Error in fetch_mails: {str(e)}")
         return jsonify({"error": str(e)}), 500
-        
+
 @app.route('/')
 def serve_index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
-
