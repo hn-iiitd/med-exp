@@ -3,16 +3,16 @@ import base64
 import logging
 import pandas as pd
 import io
-import socket
 import re
 import json
+import secrets
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, redirect, url_for
 from flask_cors import CORS
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
@@ -29,17 +29,10 @@ TOKEN_PATH = 'token.json'
 
 # Use environment variable for redirect URI
 REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:8081/')
-
-# Get port from environment variable or default to 8081 for local dev
 PORT = int(os.environ.get('PORT', 8081))
 
-def is_port_available(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(('localhost', port))
-            return True
-        except socket.error:
-            return False
+# Session state for OAuth
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(16))
 
 def load_credentials():
     try:
@@ -57,38 +50,48 @@ def load_credentials():
                 logger.debug("Refreshing credentials...")
                 creds.refresh(Request())
             else:
-                logger.debug(f"Starting OAuth flow with client secrets: {CLIENT_SECRETS_FILE}")
-                
-                # Load client secrets from environment variable
-                client_secrets_data = os.environ.get('GOOGLE_CLIENT_SECRETS')
-                if not client_secrets_data:
-                    raise FileNotFoundError("GOOGLE_CLIENT_SECRETS environment variable not set")
-                
-                # Write client secrets to a temporary file
-                with open(CLIENT_SECRETS_FILE, 'w') as f:
-                    f.write(client_secrets_data)
-                
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CLIENT_SECRETS_FILE,
-                    scopes=SCOPES,
-                    redirect_uri=REDIRECT_URI
-                )
-                logger.debug("Running OAuth flow...")
-                # Use run_console() for production environments like Render
-                creds = flow.run_console()
-                logger.debug("OAuth flow completed.")
-                
-                # Save credentials to token file
-                logger.debug("Saving new credentials to token file...")
-                with open(TOKEN_PATH, 'w') as token_file:
-                    token_file.write(creds.to_json())
+                logger.debug("No valid credentials yet. OAuth flow must be initiated.")
+                return None
         else:
             logger.debug("Credentials are valid.")
         return creds
     except Exception as e:
         logger.error(f"Error loading credentials: {str(e)}")
         raise
-        
+
+@app.route('/auth/init')
+def auth_init():
+    logger.debug("Initiating OAuth flow...")
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true'
+    )
+    # Store the state in the session to prevent CSRF
+    session['state'] = state
+    return redirect(authorization_url)
+
+@app.route('/auth/callback')
+def auth_callback():
+    logger.debug("Handling OAuth callback...")
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    flow.fetch_token(authorization_response=request.url)
+    
+    creds = flow.credentials
+    logger.debug("OAuth flow completed, saving credentials...")
+    with open(TOKEN_PATH, 'w') as token_file:
+        token_file.write(creds.to_json())
+    
+    return redirect(url_for('serve_index'))
+
 @app.route("/auth/google", methods=["POST"])
 def google_login():
     try:
@@ -145,7 +148,8 @@ def get_gmail_service():
     try:
         creds = load_credentials()
         if not creds:
-            raise Exception("Failed to load credentials")
+            logger.debug("No credentials available. Redirecting to auth_init...")
+            return redirect(url_for('auth_init'))
         logger.debug("Building Gmail API service...")
         service = build("gmail", "v1", credentials=creds)
         return service
@@ -224,5 +228,4 @@ def serve_index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == "__main__":
-
     app.run(host='0.0.0.0', port=PORT, debug=True)
