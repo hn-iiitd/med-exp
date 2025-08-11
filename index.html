@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MedExp</title>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col p-6">
+  <div class="max-w-4xl mx-auto w-full bg-white shadow-lg rounded-lg p-6">
+    <h1 class="text-3xl font-bold mb-6 text-center text-blue-600">MedExp</h1>
+
+    <!-- Login Section -->
+    <div id="login" class="text-center">
+      <div id="g_id_onload"
+           data-client_id="321296927889-0fppdrjb7loc02en2n6g1efgh2h5oj6k.apps.googleusercontent.com"
+           data-callback="handleCredentialResponse"
+           data-auto_prompt="false">
+      </div>
+      <div class="g_id_signin" data-type="standard"></div>
+    </div>
+
+    <!-- Dashboard Section -->
+    <div id="dashboard" class="hidden">
+      <!-- User Info -->
+      <div class="flex justify-between items-center mb-6">
+        <div>
+          <p class="text-lg font-semibold text-gray-700">Welcome, <span id="userEmail" class="text-blue-600"></span></p>
+          <p class="text-sm text-gray-500">Last updated: <span id="lastUpdated">-</span></p>
+        </div>
+        <button id="logoutBtn" class="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition">Logout</button>
+      </div>
+
+      <!-- Fetch and Filter Controls -->
+      <div class="flex flex-col space-y-4 mb-6">
+        <div class="flex space-x-4">
+          <button id="fetchBtn" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">Fetch Emails</button>
+          <button id="refreshBtn" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition">Refresh Table</button>
+          <button id="sortBtn" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition">Sort by Expiry (Asc)</button>
+          <button id="exportBtn" class="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 transition">Export to Excel</button>
+        </div>
+        <div class="flex items-center space-x-4">
+          <label for="searchInput" class="text-gray-700 font-medium">Search Medicine:</label>
+          <input id="searchInput" type="text" placeholder="Enter medicine name..." class="px-4 py-2 border rounded-lg w-full max-w-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="overflow-x-auto">
+        <table class="table-auto w-full text-left border-collapse">
+          <thead>
+            <tr class="bg-blue-500 text-white">
+              <th class="px-4 py-3">Medicine</th>
+              <th class="px-4 py-3">Batch No</th>
+              <th class="px-4 py-3">Expiry</th>
+              <th class="px-4 py-3">Distributor</th>
+              <th class="px-4 py-3">MRP</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody" class="text-gray-700"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let userEmail = "";
+    let originalData = [];
+    let isSortAscending = true;
+    const tableBody = document.getElementById("tableBody");
+    const dashboard = document.getElementById("dashboard");
+    const login = document.getElementById("login");
+    const userEmailDisplay = document.getElementById("userEmail");
+    const lastUpdatedDisplay = document.getElementById("lastUpdated");
+    const sortBtn = document.getElementById("sortBtn");
+    const searchInput = document.getElementById("searchInput");
+    const exportBtn = document.getElementById("exportBtn");
+    const API_BASE_URL = window.location.origin; // Use deployed URL
+
+    window.onload = function() {
+      const savedEmail = localStorage.getItem("userEmail");
+      const savedData = localStorage.getItem("medicineData");
+      if (savedEmail && savedData) {
+        userEmail = savedEmail;
+        userEmailDisplay.textContent = userEmail;
+        login.classList.add("hidden");
+        dashboard.classList.remove("hidden");
+        originalData = JSON.parse(savedData);
+        displayData(originalData);
+        const lastUpdated = localStorage.getItem("lastUpdated");
+        lastUpdatedDisplay.textContent = lastUpdated || "-";
+      }
+    };
+
+    function handleCredentialResponse(response) {
+      fetch(`${API_BASE_URL}/auth/google`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential: response.credential })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.email) {
+          userEmail = data.email;
+          userEmailDisplay.textContent = userEmail;
+          localStorage.setItem("userEmail", userEmail);
+          login.classList.add("hidden");
+          dashboard.classList.remove("hidden");
+        }
+      })
+      .catch(err => console.error("Login error:", err));
+    }
+
+    document.getElementById("fetchBtn").addEventListener("click", fetchData);
+
+    function fetchData() {
+      fetch(`${API_BASE_URL}/fetch-mails/${userEmail}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            alert("Error fetching emails: " + data.error);
+            return;
+          }
+          originalData = data;
+          localStorage.setItem("medicineData", JSON.stringify(data));
+          const now = new Date().toLocaleString();
+          localStorage.setItem("lastUpdated", now);
+          lastUpdatedDisplay.textContent = now;
+          displayData(originalData);
+          searchInput.value = "";
+        })
+        .catch(err => {
+          console.error("Fetch error:", err);
+          alert("Failed to fetch emails. Please try again.");
+        });
+    }
+
+    function parseExpiryDate(expiry) {
+      if (!expiry || expiry === "-") return null;
+      const parts = expiry.includes("/") ? expiry.split("/") : expiry.split("-");
+      let day = 1, month, year;
+
+      parts.length === 3 ? (
+        parts[0].length === 4 ? (year = parseInt(parts[0]), month = parseInt(parts[1]) - 1, day = parseInt(parts[2])) :
+        (day = parseInt(parts[0]), month = parseInt(parts[1]) - 1, year = parseInt(parts[2]))
+      ) : parts.length === 2 ? (
+        month = parseInt(parts[0]) - 1, year = parseInt(parts[1])
+      ) : null;
+
+      if (year < 100) year += 2000;
+      return new Date(year, month, day);
+    }
+
+    sortBtn.addEventListener("click", () => {
+      isSortAscending = !isSortAscending;
+      sortBtn.textContent = `Sort by Expiry (${isSortAscending ? "Asc" : "Desc"})`;
+      const filteredData = applySearchFilter(originalData);
+      const sortedData = filteredData.sort((a, b) => {
+        const dateA = parseExpiryDate(a.expiry);
+        const dateB = parseExpiryDate(b.expiry);
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return isSortAscending ? dateA - dateB : dateB - dateA;
+      });
+      displayData(sortedData);
+    });
+
+    function applySearchFilter(data) {
+      const searchTerm = searchInput.value.trim().toLowerCase();
+      if (!searchTerm) return data;
+      return data.filter(row => 
+        row.medicine && row.medicine.toLowerCase().includes(searchTerm)
+      );
+    }
+
+    searchInput.addEventListener("input", () => {
+      const filteredData = applySearchFilter(originalData);
+      const sortedData = filteredData.sort((a, b) => {
+        const dateA = parseExpiryDate(a.expiry);
+        const dateB = parseExpiryDate(b.expiry);
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return isSortAscending ? dateA - dateB : dateB - dateA;
+      });
+      displayData(sortedData);
+    });
+
+    function displayData(data) {
+      tableBody.innerHTML = "";
+      if (data.length === 0) {
+        tableBody.innerHTML = `<tr><td colspan="5" class="border px-4 py-3 text-center text-gray-500">No data available. Click "Fetch Emails" to load data.</td></tr>`;
+        return;
+      }
+      data.forEach(row => {
+        const tr = document.createElement("tr");
+        tr.classList.add("hover:bg-gray-100");
+        tr.innerHTML = `
+          <td class="border px-4 py-3">${row.medicine || "-"}</td>
+          <td class="border px-4 py-3">${row.batch_no || "-"}</td>
+          <td class="border px-4 py-3">${row.expiry || "-"}</td>
+          <td class="border px-4 py-3">${row.distributor || "-"}</td>
+          <td class="border px-4 py-3">${row.mrp || "-"}</td>
+        `;
+        tableBody.appendChild(tr);
+      });
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", () => {
+      const savedData = localStorage.getItem("medicineData");
+      if (savedData) {
+        originalData = JSON.parse(savedData);
+        const filteredData = applySearchFilter(originalData);
+        displayData(filteredData);
+      } else {
+        tableBody.innerHTML = `<tr><td colspan="5" class="border px-4 py-3 text-center text-gray-500">No data available. Click "Fetch Emails" to load data.</td></tr>`;
+      }
+    });
+
+    function exportToExcel() {
+      const filteredData = applySearchFilter(originalData);
+      const sortedData = filteredData.sort((a, b) => {
+        const dateA = parseExpiryDate(a.expiry);
+        const dateB = parseExpiryDate(b.expiry);
+        if (!dateA && !dateB) return 0;
+        if (!dateA) return 1;
+        if (!dateB) return -1;
+        return isSortAscending ? dateA - dateB : dateB - dateA;
+      });
+
+      if (sortedData.length === 0) {
+        alert("No data to export!");
+        return;
+      }
+
+      const worksheetData = sortedData.map(row => ({
+        Medicine: row.medicine || "-",
+        "Batch No": row.batch_no || "-",
+        Expiry: row.expiry || "-",
+        Distributor: row.distributor || "-",
+        MRP: row.mrp || "-"
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(worksheetData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Medicines");
+
+      XLSX.writeFile(workbook, "medicine_data.xlsx");
+    }
+
+    exportBtn.addEventListener("click", exportToExcel);
+
+    document.getElementById("logoutBtn").addEventListener("click", () => {
+      localStorage.removeItem("userEmail");
+      localStorage.removeItem("medicineData");
+      localStorage.removeItem("lastUpdated");
+      userEmail = "";
+      tableBody.innerHTML = "";
+      lastUpdatedDisplay.textContent = "-";
+      dashboard.classList.add("hidden");
+      login.classList.remove("hidden");
+      searchInput.value = "";
+      isSortAscending = true;
+      sortBtn.textContent = "Sort by Expiry (Asc)";
+    });
+  </script>
+</body>
+</html>
