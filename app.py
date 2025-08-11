@@ -68,20 +68,14 @@ def load_credentials():
                 with open(CLIENT_SECRETS_FILE, 'w') as f:
                     f.write(client_secrets_data)
                 
-                if not is_port_available(PORT) and 'localhost' in REDIRECT_URI:
-                    raise RuntimeError(f"Port {PORT} is in use. Please free the port or use a different one.")
-                
                 flow = InstalledAppFlow.from_client_secrets_file(
                     CLIENT_SECRETS_FILE,
                     scopes=SCOPES,
                     redirect_uri=REDIRECT_URI
                 )
-                logger.debug("Running OAuth flow in local server mode...")
-                try:
-                    creds = flow.run_local_server(port=PORT, open_browser=False)
-                except AttributeError:
-                    logger.debug("run_local_server not available, falling back to run_console...")
-                    creds = flow.run_console()
+                logger.debug("Running OAuth flow...")
+                # Use run_console() for production environments like Render
+                creds = flow.run_console()
                 logger.debug("OAuth flow completed.")
                 
                 # Save credentials to token file
@@ -94,7 +88,7 @@ def load_credentials():
     except Exception as e:
         logger.error(f"Error loading credentials: {str(e)}")
         raise
-
+        
 @app.route("/auth/google", methods=["POST"])
 def google_login():
     try:
@@ -230,4 +224,5 @@ def serve_index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == "__main__":
+
     app.run(host='0.0.0.0', port=PORT, debug=True)
