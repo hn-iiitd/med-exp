@@ -124,9 +124,15 @@
 
     function fetchData() {
       fetch(`${API_BASE_URL}/fetch-mails/${userEmail}`)
-        .then(res => res.json())
+        .then(res => {
+          if (res.status === 302) {
+            window.location.href = res.url; // Follow redirect to auth flow
+            return;
+          }
+          return res.json();
+        })
         .then(data => {
-          if (data.error) {
+          if (data && data.error) {
             alert("Error fetching emails: " + data.error);
             return;
           }
@@ -187,7 +193,7 @@
       const filteredData = applySearchFilter(originalData);
       const sortedData = filteredData.sort((a, b) => {
         const dateA = parseExpiryDate(a.expiry);
-        dateB = parseExpiryDate(b.expiry);
+        const dateB = parseExpiryDate(b.expiry);
         if (!dateA && !dateB) return 0;
         if (!dateA) return 1;
         if (!dateB) return -1;
