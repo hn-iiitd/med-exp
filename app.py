@@ -163,6 +163,10 @@ def fetch_mails(email):
         logger.debug(f"Fetching emails for: {email}")
         service = get_gmail_service()
         
+        # Check if service is a redirect response
+        if isinstance(service, redirect):
+            return service
+
         profile = service.users().getProfile(userId='me').execute()
         authenticated_email = profile.get('emailAddress')
         logger.debug(f"Authenticated user email: {authenticated_email}")
@@ -222,10 +226,11 @@ def fetch_mails(email):
     except Exception as e:
         logger.error(f"Error in fetch_mails: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
+        
 @app.route('/')
 def serve_index():
     return send_from_directory('.', 'index.html')
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
+
