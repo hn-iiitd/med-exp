@@ -213,17 +213,17 @@ def fetch_mails(email):
     """
     try:
         service = get_gmail_service()
-    if service is None:
-        logger.debug("No Gmail credentials available -> returning auth_url to frontend.")
-        flow = build_oauth_flow()
-        auth_url, state = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true',
-            prompt='consent'
-        )
-        session['state'] = state
-        # Changed from `return ..., 401` to just `return ...` so status=200
-        return jsonify({"auth_required": True, "auth_url": auth_url})
+        if service is None:
+            logger.debug("No Gmail credentials available -> returning auth_url to frontend.")
+            flow = build_oauth_flow()
+            auth_url, state = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='consent'
+            )
+            session['state'] = state
+            # Changed from `return ..., 401` to just `return ...` so status=200
+            return jsonify({"auth_required": True, "auth_url": auth_url})
 
 
         # verify authenticated user
@@ -324,4 +324,5 @@ def serve_index():
 # ---------- Run ----------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
+
 
