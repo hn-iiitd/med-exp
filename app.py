@@ -14,6 +14,7 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from werkzeug.wrappers import Response  # ✅ Added for proper type checking
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -26,12 +27,11 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 CLIENT_SECRETS_FILE = 'client_secrets.json'
 TOKEN_PATH = 'token.json'
 
-# Use environment variable for redirect URI
 REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:8081/')
 PORT = int(os.environ.get('PORT', 8081))
 
-# Session state for OAuth
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(16))
+
 
 def load_credentials():
     try:
@@ -58,6 +58,7 @@ def load_credentials():
         logger.error(f"Error loading credentials: {str(e)}")
         raise
 
+
 @app.route('/auth/init')
 def auth_init():
     logger.debug("Initiating OAuth flow...")
@@ -70,10 +71,10 @@ def auth_init():
         access_type='offline',
         include_granted_scopes='true'
     )
-    # Store the state in the session to prevent CSRF
     session['state'] = state
     logger.debug(f"Stored state in session: {state}")
     return redirect(authorization_url)
+
 
 @app.route('/auth/callback')
 def auth_callback():
@@ -83,20 +84,20 @@ def auth_callback():
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
-    # Check if state is present in session
     if 'state' not in session:
         logger.error("State not found in session. Possible CSRF attack or session issue.")
         return jsonify({"error": "Invalid session state"}), 400
     state = session['state']
     flow.fetch_token(authorization_response=request.url, state=state)
-    session.pop('state', None)  # Clean up state after use
-    
+    session.pop('state', None)
+
     creds = flow.credentials
     logger.debug("OAuth flow completed, saving credentials...")
     with open(TOKEN_PATH, 'w') as token_file:
         token_file.write(creds.to_json())
-    
+
     return redirect(url_for('serve_index'))
+
 
 @app.route("/auth/google", methods=["POST"])
 def google_login():
@@ -110,32 +111,29 @@ def google_login():
         logger.error(f"Error in google_login: {str(e)}")
         return jsonify({"error": str(e)}), 400
 
+
 def extract_fields_from_df(df, sender_email):
     extracted = []
     for _, row in df.iterrows():
-        med = None
-        batch = None
-        exp = None
-        mrp = None
-        distributor = None
+        med = batch = exp = mrp = distributor = None
 
         for col in df.columns:
             col_lower = col.lower()
             val = str(row[col])
 
-            if re.search(r'\b(item\s*name|particulars|item\s*description|description)\b', col_lower, re.IGNORECASE):
+            if re.search(r'\b(item\s*name|particulars|item\s*description|description)\b', col_lower):
                 med = val.strip()
-            elif re.search(r'\b(batch\s*no|batchno|batch)\b', col_lower, re.IGNORECASE):
+            elif re.search(r'\b(batch\s*no|batchno|batch)\b', col_lower):
                 batch = val.strip()
-            elif re.search(r'\b(expiry|exp\s*dt|exp)\b', col_lower, re.IGNORECASE):
+            elif re.search(r'\b(expiry|exp\s*dt|exp)\b', col_lower):
                 exp = val.strip()
-            elif re.search(r'\b(mrp|price|retail\s*price)\b', col_lower, re.IGNORECASE):
+            elif re.search(r'\b(mrp|price|retail\s*price)\b', col_lower):
                 try:
                     mrp = float(val.strip())
                 except (ValueError, TypeError):
                     mrp = None
                     logger.debug(f"Could not parse MRP value: {val}")
-            elif re.search(r'\b(distributor)\b', col_lower, re.IGNORECASE):
+            elif re.search(r'\b(distributor)\b', col_lower):
                 distributor = val.strip()
                 logger.debug(f"Found distributor in file: {distributor}")
 
@@ -150,27 +148,28 @@ def extract_fields_from_df(df, sender_email):
             })
     return extracted
 
+
 def get_gmail_service():
     try:
         creds = load_credentials()
         if not creds:
             logger.debug("No credentials available. Redirecting to auth_init...")
-            return redirect(url_for('auth_init'))
+            return redirect(url_for('auth_init'))  # This returns a Response object
         logger.debug("Building Gmail API service...")
-        service = build("gmail", "v1", credentials=creds)
-        return service
+        return build("gmail", "v1", credentials=creds)
     except Exception as e:
         logger.error(f"Error in get_gmail_service: {str(e)}")
         raise
+
 
 @app.route("/fetch-mails/<email>")
 def fetch_mails(email):
     try:
         logger.debug(f"Fetching emails for: {email}")
         service = get_gmail_service()
-        
-        # Check if service is a redirect response
-        if isinstance(service, redirect):
+
+        # ✅ Correct type check for redirect response
+        if isinstance(service, Response):
             return service
 
         profile = service.users().getProfile(userId='me').execute()
@@ -191,15 +190,13 @@ def fetch_mails(email):
             logger.debug(f"Processing message ID: {msg['id']}")
             msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
             headers = msg_data['payload']['headers']
-            sender_email = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown')
-            logger.debug(f"Raw From header: {sender_email}")
-            
+            sender_email = next((h['value'] for h in headers if h['name'].lower() == 'from'), 'Unknown')
+
             email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', sender_email)
             sender_email = email_match.group(0) if email_match else 'Unknown'
             logger.debug(f"Extracted sender email: {sender_email}")
 
             parts = msg_data['payload'].get('parts', [])
-
             for part in parts:
                 filename = part.get('filename')
                 body = part.get('body', {})
@@ -214,15 +211,11 @@ def fetch_mails(email):
                     file_data = base64.urlsafe_b64decode(attachment['data'])
                     try:
                         if filename.endswith('.csv'):
-                            logger.debug(f"Reading CSV file: {filename}")
                             df = pd.read_csv(io.BytesIO(file_data))
-                        elif filename.endswith('.xlsx') or filename.endswith('.xls'):
-                            logger.debug(f"Reading Excel file: {filename}")
+                        else:
                             df = pd.read_excel(io.BytesIO(file_data))
 
                         extracted_data.extend(extract_fields_from_df(df, sender_email))
-                        logger.debug(f"Extracted data from {filename}")
-
                     except Exception as e:
                         logger.error(f"Error reading {filename}: {str(e)}")
 
@@ -233,9 +226,11 @@ def fetch_mails(email):
         logger.error(f"Error in fetch_mails: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/')
 def serve_index():
     return send_from_directory('.', 'index.html')
+
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
