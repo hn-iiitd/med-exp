@@ -122,33 +122,45 @@
 
     document.getElementById("fetchBtn").addEventListener("click", fetchData);
 
-    function fetchData() {
-      fetch(`${API_BASE_URL}/fetch-mails/${userEmail}`)
-        .then(res => {
-          if (res.status === 302) {
-            window.location.href = res.url; // Follow redirect to auth flow
-            return;
-          }
-          return res.json();
-        })
-        .then(data => {
-          if (data && data.error) {
-            alert("Error fetching emails: " + data.error);
-            return;
-          }
-          originalData = data;
-          localStorage.setItem("medicineData", JSON.stringify(data));
-          const now = new Date().toLocaleString();
-          localStorage.setItem("lastUpdated", now);
-          lastUpdatedDisplay.textContent = now;
-          displayData(originalData);
-          searchInput.value = "";
-        })
-        .catch(err => {
-          console.error("Fetch error:", err);
-          alert("Failed to fetch emails. Please try again.");
-        });
-    }
+  function fetchData() {
+    fetch(`${API_BASE_URL}/fetch-mails/${userEmail}`)
+      .then(res => {
+        // Old style: redirect to Gmail auth
+        if (res.status === 302) {
+          window.location.href = res.url;
+          return;
+        }
+        return res.json();
+      })
+      .then(data => {
+        if (!data) return;
+
+      // New style: backend tells us to go authorize
+        if (data.auth_required && data.auth_url) {
+          window.location.href = data.auth_url;
+          return;
+        }
+
+        if (data.error) {
+          alert("Error fetching emails: " + data.error);
+          return;
+        }
+
+      // Normal case: got medicine data
+        originalData = data;
+        localStorage.setItem("medicineData", JSON.stringify(data));
+        const now = new Date().toLocaleString();
+        localStorage.setItem("lastUpdated", now);
+        lastUpdatedDisplay.textContent = now;
+        displayData(originalData);
+        searchInput.value = "";
+      })
+      .catch(err => {
+        console.error("Fetch error:", err);
+        alert("Failed to fetch emails. Please try again.");
+      });
+  }
+
 
     function parseExpiryDate(expiry) {
       if (!expiry || expiry === "-") return null;
@@ -282,3 +294,4 @@
   </script>
 </body>
 </html>
+
