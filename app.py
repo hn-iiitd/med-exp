@@ -5,6 +5,7 @@ import pandas as pd
 import io
 import re
 import secrets
+import json
 
 from flask import (
     Flask, request, jsonify, send_from_directory,
@@ -25,7 +26,6 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 CORS(app, supports_credentials=True)
 
-# Updated SCOPES to include all expected Google scopes
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/userinfo.profile',
@@ -35,8 +35,6 @@ SCOPES = [
 CLIENT_SECRETS_FILE = 'client_secrets.json'   # your client secrets
 TOKEN_PATH = 'token.json'                     # saved token path
 
-# Optional: set REDIRECT_URI via env var if needed (must match OAuth client config).
-# If not set, we'll use request.url_root + 'auth/callback' when building Flow.
 REDIRECT_URI = os.environ.get('REDIRECT_URI')  # e.g. "http://localhost:8081/auth/callback"
 PORT = int(os.environ.get('PORT', 8081))
 
@@ -51,24 +49,38 @@ def load_credentials():
         creds = None
         logger.debug(f"Checking for token file at: {TOKEN_PATH}")
         if os.path.exists(TOKEN_PATH):
-            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-            logger.debug("Loaded credentials from token file.")
+            try:
+                with open(TOKEN_PATH, 'r') as tf:
+                    token_data = json.load(tf)
+                # Check for required fields
+                if 'refresh_token' not in token_data:
+                    logger.error(f"Token file {TOKEN_PATH} missing refresh_token")
+                    return None
+                creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+                logger.debug("Loaded credentials from token file.")
+            except ValueError as ve:
+                logger.error(f"Invalid token file format: {ve}")
+                return None
         else:
             logger.debug("No token file found.")
 
         if creds and creds.expired and creds.refresh_token:
             logger.debug("Credentials expired - refreshing...")
-            creds.refresh(Request())
-            with open(TOKEN_PATH, 'w') as tf:
-                tf.write(creds.to_json())
-            logger.debug("Credentials refreshed and saved.")
+            try:
+                creds.refresh(Request())
+                with open(TOKEN_PATH, 'w') as tf:
+                    tf.write(creds.to_json())
+                logger.debug("Credentials refreshed and saved.")
+            except Exception as re:
+                logger.error(f"Failed to refresh credentials: {re}")
+                return None
         if not creds or not creds.valid:
             logger.debug("No valid credentials available.")
             return None
 
         return creds
     except Exception as e:
-        logger.exception("Error loading credentials")
+        logger.exception(f"Error loading credentials: {e}")
         return None
 
 def build_oauth_flow(redirect_uri=None):
@@ -79,7 +91,6 @@ def build_oauth_flow(redirect_uri=None):
     elif REDIRECT_URI:
         ri = REDIRECT_URI
     else:
-        # fallback — caller should be in request context
         ri = request.url_root.rstrip('/') + '/auth/callback'
     return Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
@@ -155,7 +166,7 @@ def auth_init():
     auth_url, state = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
-        prompt='select_account'  # Changed to avoid forcing consent every time
+        prompt='consent'  # Changed to ensure refresh_token is issued
     )
     session['state'] = state
     logger.debug(f"Auth init: stored state and redirecting to Google. state={state}")
@@ -170,16 +181,17 @@ def auth_callback():
         logger.error("No state in session during callback.")
         return jsonify({"error": "Session state missing"}), 400
 
-    # Build flow using same redirect uri as initiation
     flow = build_oauth_flow()
     try:
-        # Fetch token with strict scope validation disabled to handle Google's scope additions
         flow.fetch_token(authorization_response=request.url)
+        creds = flow.credentials
+        if not creds.refresh_token:
+            logger.error("No refresh_token received in OAuth flow")
+            return jsonify({"error": "Failed to obtain refresh_token from Google"}), 500
     except Exception as e:
         logger.exception(f"Error fetching token: {e}")
         return jsonify({"error": f"Failed to fetch token: {str(e)}"}), 500
 
-    creds = flow.credentials
     if not creds:
         logger.error("No credentials obtained from flow.")
         return jsonify({"error": "Failed to retrieve credentials"}), 500
@@ -192,12 +204,11 @@ def auth_callback():
     # Clean state
     session.pop('state', None)
 
-    # Redirect back to UI
     return redirect('/')
 
 @app.route("/auth/google", methods=["POST"])
 def google_login():
-    """Optional client-side Google Sign-In verification route (kept from original)."""
+    """Optional client-side Google Sign-In verification route."""
     try:
         token = request.json.get("credential")
         idinfo = id_token.verify_oauth2_token(token, google_requests.Request())
@@ -213,7 +224,7 @@ def google_login():
 def fetch_mails(email):
     """
     Main endpoint:
-      - If not authenticated -> returns JSON {auth_required: true, auth_url: "..."} (401)
+      - If not authenticated -> returns JSON {auth_required: true, auth_url: "..."}
       - If authenticated -> fetch attachments, parse CSV/XLSX, extract fields, return JSON
     """
     try:
@@ -224,12 +235,11 @@ def fetch_mails(email):
             auth_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                prompt='select_account'  # Changed to avoid forcing consent
+                prompt='consent'  # Changed to ensure refresh_token
             )
             session['state'] = state
             return jsonify({"auth_required": True, "auth_url": auth_url})
 
-        # Verify authenticated user
         profile = service.users().getProfile(userId='me').execute()
         authenticated_email = profile.get('emailAddress')
         logger.debug(f"Authenticated user email: {authenticated_email}")
@@ -237,7 +247,6 @@ def fetch_mails(email):
             logger.warning(f"Email mismatch: requested {email}, authenticated {authenticated_email}")
             return jsonify({"error": "Email does not match authenticated user"}), 403
 
-        # List messages with attachments
         logger.debug("Listing messages with attachments...")
         results = service.users().messages().list(userId='me', q="has:attachment").execute()
         messages = results.get('messages', [])
@@ -252,20 +261,17 @@ def fetch_mails(email):
             msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
             payload = msg_data.get('payload', {})
             headers = payload.get('headers', [])
-            # Extract 'From' header
             raw_from = next((h['value'] for h in headers if h.get('name','').lower() == 'from'), 'Unknown')
             email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', raw_from)
             sender_email = email_match.group(0) if email_match else 'Unknown'
             logger.debug(f"Extracted sender email: {sender_email}")
 
-            # Walk parts recursively to find attachments
             parts = payload.get('parts', [])
             for part in walk_parts(parts):
                 filename = part.get('filename') or ''
                 body = part.get('body', {}) or {}
                 attachment_id = body.get('attachmentId') or body.get('body', {}).get('attachmentId')
 
-                # Skip if no filename or no attachmentId
                 if not filename or not attachment_id:
                     continue
 
@@ -287,7 +293,6 @@ def fetch_mails(email):
 
                         file_bytes = base64.urlsafe_b64decode(data.encode('utf-8'))
 
-                        # Read file into pandas DataFrame
                         try:
                             if filename_lower.endswith('.csv'):
                                 df = pd.read_csv(io.BytesIO(file_bytes))
