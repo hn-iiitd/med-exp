@@ -72,6 +72,7 @@ def auth_init():
     )
     # Store the state in the session to prevent CSRF
     session['state'] = state
+    logger.debug(f"Stored state in session: {state}")
     return redirect(authorization_url)
 
 @app.route('/auth/callback')
@@ -82,7 +83,13 @@ def auth_callback():
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
-    flow.fetch_token(authorization_response=request.url)
+    # Check if state is present in session
+    if 'state' not in session:
+        logger.error("State not found in session. Possible CSRF attack or session issue.")
+        return jsonify({"error": "Invalid session state"}), 400
+    state = session['state']
+    flow.fetch_token(authorization_response=request.url, state=state)
+    session.pop('state', None)  # Clean up state after use
     
     creds = flow.credentials
     logger.debug("OAuth flow completed, saving credentials...")
