@@ -25,7 +25,13 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 CORS(app, supports_credentials=True)
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+# Updated SCOPES to include all expected Google scopes
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'openid'
+]
 CLIENT_SECRETS_FILE = 'client_secrets.json'   # your client secrets
 TOKEN_PATH = 'token.json'                     # saved token path
 
@@ -36,7 +42,6 @@ PORT = int(os.environ.get('PORT', 8081))
 
 # Session secret
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', secrets.token_hex(32))
-
 
 # ---------- Helpers ----------
 def load_credentials():
@@ -66,7 +71,6 @@ def load_credentials():
         logger.exception("Error loading credentials")
         return None
 
-
 def build_oauth_flow(redirect_uri=None):
     """Helper to build a Flow; prefer provided redirect_uri, then env REDIRECT_URI,
        then request.url_root + 'auth/callback' (caller must ensure request context exists)."""
@@ -83,7 +87,6 @@ def build_oauth_flow(redirect_uri=None):
         redirect_uri=ri
     )
 
-
 def walk_parts(parts):
     """Yield parts recursively (generator)."""
     for p in parts or []:
@@ -92,7 +95,6 @@ def walk_parts(parts):
         if sub:
             for q in walk_parts(sub):
                 yield q
-
 
 def extract_fields_from_df(df, sender_email):
     """Your extraction logic — unchanged except minor safety checks."""
@@ -134,7 +136,6 @@ def extract_fields_from_df(df, sender_email):
             })
     return extracted
 
-
 def get_gmail_service():
     """Return Gmail API service or None if auth required."""
     creds = load_credentials()
@@ -146,17 +147,19 @@ def get_gmail_service():
         logger.exception("Failed to build Gmail service")
         return None
 
-
 # ---------- OAuth endpoints ----------
 @app.route('/auth/init')
 def auth_init():
     """Redirects user to Google for auth (useful for manual testing in browser)."""
     flow = build_oauth_flow()
-    auth_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true', prompt='consent')
+    auth_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='select_account'  # Changed to avoid forcing consent every time
+    )
     session['state'] = state
     logger.debug(f"Auth init: stored state and redirecting to Google. state={state}")
     return redirect(auth_url)
-
 
 @app.route('/auth/callback')
 def auth_callback():
@@ -168,10 +171,14 @@ def auth_callback():
         return jsonify({"error": "Session state missing"}), 400
 
     # Build flow using same redirect uri as initiation
-    # Use request context redirect root if env var not set
     flow = build_oauth_flow()
-    # Attach state then fetch token
-    flow.fetch_token(authorization_response=request.url)
+    try:
+        # Fetch token with strict scope validation disabled to handle Google's scope additions
+        flow.fetch_token(authorization_response=request.url)
+    except Exception as e:
+        logger.exception(f"Error fetching token: {e}")
+        return jsonify({"error": f"Failed to fetch token: {str(e)}"}), 500
+
     creds = flow.credentials
     if not creds:
         logger.error("No credentials obtained from flow.")
@@ -185,9 +192,8 @@ def auth_callback():
     # Clean state
     session.pop('state', None)
 
-    # Redirect back to UI (frontend should handle redirect target)
+    # Redirect back to UI
     return redirect('/')
-
 
 @app.route("/auth/google", methods=["POST"])
 def google_login():
@@ -201,7 +207,6 @@ def google_login():
     except Exception as e:
         logger.exception("Error in google_login")
         return jsonify({"error": str(e)}), 400
-
 
 # ---------- Main API: fetch mails and extract attachments ----------
 @app.route("/fetch-mails/<email>")
@@ -219,14 +224,12 @@ def fetch_mails(email):
             auth_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                prompt='consent'
+                prompt='select_account'  # Changed to avoid forcing consent
             )
             session['state'] = state
-            # Changed from `return ..., 401` to just `return ...` so status=200
             return jsonify({"auth_required": True, "auth_url": auth_url})
 
-
-        # verify authenticated user
+        # Verify authenticated user
         profile = service.users().getProfile(userId='me').execute()
         authenticated_email = profile.get('emailAddress')
         logger.debug(f"Authenticated user email: {authenticated_email}")
@@ -234,7 +237,7 @@ def fetch_mails(email):
             logger.warning(f"Email mismatch: requested {email}, authenticated {authenticated_email}")
             return jsonify({"error": "Email does not match authenticated user"}), 403
 
-        # list messages with attachments
+        # List messages with attachments
         logger.debug("Listing messages with attachments...")
         results = service.users().messages().list(userId='me', q="has:attachment").execute()
         messages = results.get('messages', [])
@@ -249,7 +252,7 @@ def fetch_mails(email):
             msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
             payload = msg_data.get('payload', {})
             headers = payload.get('headers', [])
-            # Extract 'From' header (and try to get sender email only)
+            # Extract 'From' header
             raw_from = next((h['value'] for h in headers if h.get('name','').lower() == 'from'), 'Unknown')
             email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', raw_from)
             sender_email = email_match.group(0) if email_match else 'Unknown'
@@ -275,7 +278,6 @@ def fetch_mails(email):
                         ).execute()
 
                         data = attachment.get('data')
-                        # Some responses contain 'data' under 'body' as well
                         if not data:
                             data = attachment.get('body', {}).get('data')
 
@@ -285,7 +287,7 @@ def fetch_mails(email):
 
                         file_bytes = base64.urlsafe_b64decode(data.encode('utf-8'))
 
-                        # read file into pandas DataFrame
+                        # Read file into pandas DataFrame
                         try:
                             if filename_lower.endswith('.csv'):
                                 df = pd.read_csv(io.BytesIO(file_bytes))
@@ -310,19 +312,14 @@ def fetch_mails(email):
         logger.exception("Error in fetch_mails")
         return jsonify({"error": str(e)}), 500
 
-
 # ---------- Serve index (optional) ----------
 @app.route('/')
 def serve_index():
-    # change if your frontend index path is different
     try:
         return send_from_directory('.', 'index.html')
     except Exception:
         return jsonify({"status": "Server running"})
 
-
 # ---------- Run ----------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
-
-
