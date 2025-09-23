@@ -6,7 +6,11 @@ import io
 import re
 import secrets
 import json
-
+import httplib2
+from google_auth_httplib2 import AuthorizedHttp
+import socket
+import requests
+from flask import jsonify
 from flask import (
     Flask, request, jsonify, send_from_directory,
     redirect, url_for, session
@@ -147,16 +151,22 @@ def extract_fields_from_df(df, sender_email):
             })
     return extracted
 
-def get_gmail_service():
-    """Return Gmail API service or None if auth required."""
+
+
+def get_gmail_service(timeout: int = 30):
+    """Return Gmail API service with per-request timeout, or None if auth required."""
     creds = load_credentials()
     if not creds:
         return None
+
     try:
-        return build("gmail", "v1", credentials=creds)
+        http = httplib2.Http(timeout=timeout)
+        authed_http = AuthorizedHttp(creds, http=http)
+        return build("gmail", "v1", http=authed_http, cache_discovery=False)
     except Exception as e:
         logger.exception("Failed to build Gmail service")
         return None
+
 
 # ---------- OAuth endpoints ----------
 @app.route('/auth/init')
@@ -235,36 +245,52 @@ def fetch_mails(email):
             auth_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                prompt='consent'  # Changed to ensure refresh_token
+                prompt='consent'  # ensure refresh_token
             )
             session['state'] = state
             return jsonify({"auth_required": True, "auth_url": auth_url})
 
-        profile = service.users().getProfile(userId='me').execute()
-        authenticated_email = profile.get('emailAddress')
-        logger.debug(f"Authenticated user email: {authenticated_email}")
+        # Verify authenticated user
+        try:
+            profile = service.users().getProfile(userId='me').execute()
+            authenticated_email = profile.get('emailAddress')
+        except (socket.timeout, requests.exceptions.RequestException, Exception) as e:
+            logger.exception(f"Timeout/error fetching profile: {e}")
+            return jsonify({"error": "Failed to fetch Gmail profile"}), 500
+
         if authenticated_email != email:
             logger.warning(f"Email mismatch: requested {email}, authenticated {authenticated_email}")
             return jsonify({"error": "Email does not match authenticated user"}), 403
 
         logger.debug("Listing messages with attachments...")
-        results = service.users().messages().list(userId='me', q="has:attachment").execute()
-        messages = results.get('messages', [])
-        logger.debug(f"Found {len(messages)} messages with attachments.")
+        try:
+            results = service.users().messages().list(userId='me', q="has:attachment").execute()
+            messages = results.get('messages', [])
+        except (socket.timeout, requests.exceptions.RequestException, Exception) as e:
+            logger.exception(f"Timeout/error listing messages: {e}")
+            return jsonify({"error": "Failed to list Gmail messages"}), 500
 
+        logger.debug(f"Found {len(messages)} messages with attachments.")
         extracted_data = []
 
         for msg in messages[:100]:
             msg_id = msg.get('id')
             logger.debug(f"Processing message ID: {msg_id}")
 
-            msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+            # Fetch message metadata
+            try:
+                msg_data = service.users().messages().get(
+                    userId='me', id=msg_id, format='full'
+                ).execute()
+            except (socket.timeout, requests.exceptions.RequestException, Exception) as e:
+                logger.exception(f"Timeout/error fetching message {msg_id}: {e}")
+                continue  # Skip this message, don't kill the worker
+
             payload = msg_data.get('payload', {})
             headers = payload.get('headers', [])
             raw_from = next((h['value'] for h in headers if h.get('name','').lower() == 'from'), 'Unknown')
             email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', raw_from)
             sender_email = email_match.group(0) if email_match else 'Unknown'
-            logger.debug(f"Extracted sender email: {sender_email}")
 
             parts = payload.get('parts', [])
             for part in walk_parts(parts):
@@ -283,10 +309,7 @@ def fetch_mails(email):
                             userId='me', messageId=msg_id, id=attachment_id
                         ).execute()
 
-                        data = attachment.get('data')
-                        if not data:
-                            data = attachment.get('body', {}).get('data')
-
+                        data = attachment.get('data') or attachment.get('body', {}).get('data')
                         if not data:
                             logger.warning(f"No data found for attachment {filename} in message {msg_id}")
                             continue
@@ -299,6 +322,7 @@ def fetch_mails(email):
                             else:
                                 df = pd.read_excel(io.BytesIO(file_bytes))
                             logger.debug(f"Read file into DataFrame (rows={len(df)})")
+
                             extracted = extract_fields_from_df(df, sender_email)
                             extracted_data.extend(extracted)
                             logger.debug(f"Extracted {len(extracted)} rows from {filename}")
@@ -306,8 +330,8 @@ def fetch_mails(email):
                             logger.exception(f"Failed to parse attachment {filename}: {e}")
                             continue
 
-                    except Exception as e:
-                        logger.exception(f"Error downloading attachment {filename} from message {msg_id}: {e}")
+                    except (socket.timeout, requests.exceptions.RequestException, Exception) as e:
+                        logger.exception(f"Timeout/error downloading attachment {filename} from message {msg_id}: {e}")
                         continue
 
         logger.debug(f"Returning {len(extracted_data)} extracted items.")
@@ -328,3 +352,4 @@ def serve_index():
 # ---------- Run ----------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
+
