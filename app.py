@@ -273,7 +273,7 @@ def fetch_mails(email):
         logger.debug(f"Found {len(messages)} messages with attachments.")
         extracted_data = []
 
-        for msg in messages[:100]:
+        for msg in messages[:3000]:
             msg_id = msg.get('id')
             logger.debug(f"Processing message ID: {msg_id}")
 
@@ -352,4 +352,5 @@ def serve_index():
 # ---------- Run ----------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=PORT, debug=True)
+
 
